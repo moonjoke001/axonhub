@@ -173,6 +173,33 @@ func routeForModel(model string) route {
 	}
 }
 
+// museReasoningEffortCeiling is the highest reasoning effort the OpenCode Go
+// upstream accepts for muse models. "max" appears in the platform's advertised
+// effort list but is rejected for muse with an invalid-parameters error.
+const museReasoningEffortCeiling = "xhigh"
+
+// normalizeMuseReasoningEffort rewrites reasoning efforts that the OpenCode Go
+// upstream rejects for muse models. Muse is only served on /v1/responses and
+// requires a valid effort there:
+//   - "none" (e.g. Anthropic thinking.type=disabled, sent by Claude Code's
+//     internal small-model calls) fails with "reasoning_effort 'none' is not
+//     supported";
+//   - "max" (passed through verbatim from output_config.effort) fails with a
+//     generic invalid-parameters error.
+//
+// Both are mapped to the model's real ceiling so non-thinking clients work
+// unchanged. Valid efforts (minimal..xhigh) pass through untouched.
+func normalizeMuseReasoningEffort(llmReq *llm.Request) {
+	if llmReq == nil || !strings.HasPrefix(llmReq.Model, "muse") {
+		return
+	}
+
+	switch llmReq.ReasoningEffort {
+	case "none", "max":
+		llmReq.ReasoningEffort = museReasoningEffortCeiling
+	}
+}
+
 func (t *OutboundTransformer) sub(r route) transformer.Outbound {
 	switch r {
 	case routeDeepseek:
@@ -214,6 +241,7 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 	}
 
 	r := routeForModel(llmReq.Model)
+	normalizeMuseReasoningEffort(llmReq)
 	httpReq, err := t.sub(r).TransformRequest(ctx, llmReq)
 	if err != nil {
 		return nil, err

@@ -259,6 +259,94 @@ func TestOutboundTransformer_TransformRequest_DeepSeekThinking(t *testing.T) {
 	assert.Equal(t, "enabled", dsReq.Thinking.Type)
 }
 
+func TestOutboundTransformer_TransformRequest_NormalizesMuseReasoningEffort(t *testing.T) {
+	tr := newTestTransformer(t)
+
+	// passthroughMarker marks non-muse cases where the wire format has no
+	// reasoning field and only the request-level effort must be untouched.
+	const passthroughMarker = "\x00passthrough"
+
+	tests := []struct {
+		name            string
+		model           string
+		reasoningEffort string
+		wantEffort      string // expected reasoning.effort in the outgoing body; "" = assert request-level effort stays empty; passthroughMarker = non-muse untouched
+	}{
+		{
+			// Claude Code's internal small-model calls send thinking.type=disabled,
+			// which the Anthropic inbound converts to reasoning_effort "none".
+			name:            "muse with none effort is raised to xhigh",
+			model:           "muse-spark-1.3-contributor",
+			reasoningEffort: "none",
+			wantEffort:      "xhigh",
+		},
+		{
+			// output_config.effort passes "max" through verbatim, but the upstream
+			// rejects it for muse even though it advertises it platform-wide.
+			name:            "muse with max effort is clamped to xhigh",
+			model:           "muse-spark-1.3-contributor",
+			reasoningEffort: "max",
+			wantEffort:      "xhigh",
+		},
+		{
+			name:            "muse with valid effort passes through",
+			model:           "muse-spark-1.3-contributor",
+			reasoningEffort: "high",
+			wantEffort:      "high",
+		},
+		{
+			name:            "muse without effort stays omitted",
+			model:           "muse-spark-1.3-contributor",
+			reasoningEffort: "",
+			wantEffort:      "",
+		},
+		{
+			name:            "non-muse model is untouched",
+			model:           "glm-5.3",
+			reasoningEffort: "none",
+			wantEffort:      passthroughMarker,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			llmReq := &llm.Request{
+				Model:           tt.model,
+				ReasoningEffort: tt.reasoningEffort,
+				Messages: []llm.Message{
+					{Role: "user", Content: llm.MessageContent{Content: lo.ToPtr("Hello")}},
+				},
+			}
+			httpReq, err := tr.TransformRequest(context.Background(), llmReq)
+			require.NoError(t, err)
+
+			if tt.wantEffort == "" {
+				// No wire-level expectation: assert the request-level effort directly.
+				assert.Empty(t, llmReq.ReasoningEffort)
+				return
+			}
+
+			var body struct {
+				Reasoning *struct {
+					Effort string `json:"effort"`
+				} `json:"reasoning"`
+			}
+			require.NoError(t, json.Unmarshal(httpReq.Body, &body))
+
+			if tt.wantEffort == passthroughMarker {
+				// Non-muse route (chat) does not emit reasoning at all; the
+				// normalization must not have mutated the request-level effort.
+				assert.Equal(t, tt.reasoningEffort, llmReq.ReasoningEffort)
+				assert.Nil(t, body.Reasoning)
+				return
+			}
+
+			require.NotNil(t, body.Reasoning, "reasoning should be present")
+			assert.Equal(t, tt.wantEffort, body.Reasoning.Effort)
+		})
+	}
+}
+
 func TestOutboundTransformer_TransformResponse_RoutesByMetadata(t *testing.T) {
 	tr := newTestTransformer(t)
 
